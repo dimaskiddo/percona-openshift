@@ -2,7 +2,6 @@
 chmod = 0700
 username = dummy
 password = dummy
-file = /tmp/supervisord.sock
 
 [supervisord]
 childlogdir = /var/log/supervisor
@@ -12,7 +11,6 @@ pidfile = /tmp/supervisord.pid
 [supervisorctl]
 username = dummy
 password = dummy
-serverurl = unix:///tmp/supervisor.sock
 
 [program:mysql]
 priority = 1
@@ -76,7 +74,7 @@ autorestart = true
 
 [program:cron2]
 priority = 5
-command = go-cron "0 0 0 * * *" env MYCNF=/opt/.my.cnf /etc/cron.daily/purge-qan-data
+command = go-cron "0 0 0 * * *" /etc/cron.daily/purge-qan-data
 stdout_logfile = /var/log/cron2.log
 stderr_logfile = /var/log/cron2.log
 autorestart = true
@@ -104,7 +102,7 @@ command =
         --storage.local.chunk-encoding-version=2
         --web.console.libraries=/usr/share/prometheus1/console_libraries
         --web.console.templates=/usr/share/prometheus1/consoles
-        --web.external-url=http://localhost:9094/prometheus/
+        --web.external-url=http://localhost:9094/prometheus1/
         --web.max-connections=ENV_MAX_CONNECTIONS
 stdout_logfile = /var/log/prometheus1.log
 stderr_logfile = /var/log/prometheus1.log
@@ -123,6 +121,7 @@ command =
         --web.console.libraries=/usr/share/prometheus/console_libraries
         --web.console.templates=/usr/share/prometheus/consoles
         --web.external-url=http://localhost:9090/prometheus/
+        --web.enable-admin-api
         --web.enable-lifecycle
 stdout_logfile = /var/log/prometheus.log
 stderr_logfile = /var/log/prometheus.log
@@ -163,7 +162,7 @@ autorestart = unexpected
 priority = 9
 directory = /usr/share/orchestrator
 # Sleep to wait for mysql to start up.
-command = bash -c "sleep 7 && /usr/sbin/orchestrator http"
+command = bash -c "sleep 7 && /usr/sbin/orchestrator -verbose http"
 stdout_logfile = /var/log/orchestrator.log
 stderr_logfile = /var/log/orchestrator.log
 startretries = 60
@@ -202,6 +201,7 @@ autorestart = true
 
 [program:pmm-managed]
 priority = 13
+environment = PMM_QAN_API_URL=http://127.0.0.1:8080/qan-api/
 command =
     /usr/sbin/pmm-managed
         -prometheus-config /etc/prometheus.yml
