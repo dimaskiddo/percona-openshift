@@ -1,24 +1,76 @@
 #!/bin/bash
-set -x
 
-_PROXY_ADMIN_USER="${PROXY_ADMIN_USER:-admin}"
-_PROXY_ADMIN_PASSWORD=$(echo "${PROXY_ADMIN_PASSWORD:-admin}" | tr -cd '[:print:]')
-_PROXY_ADMIN_PORT="${PROXY_ADMIN_PORT:-6032}"
+set -o xtrace
 
-sed -i "s/admin:admin/$_PROXY_ADMIN_USER:$_PROXY_ADMIN_PASSWORD/g" /etc/proxysql/proxysql.cnf &>>/tmp/sed
-sed -i "s/0.0.0.0:6032/0.0.0.0:$_PROXY_ADMIN_PORT/g" /etc/proxysql/proxysql.cnf &>>/tmp/sed
-sed "s/PROXYSQL_USERNAME='admin'/PROXYSQL_USERNAME='$_PROXY_ADMIN_USER'/g" /etc/proxysql-admin.cnf 1<> /etc/proxysql-admin.cnf
-sed "s/PROXYSQL_PASSWORD='admin'/PROXYSQL_PASSWORD='$_PROXY_ADMIN_PASSWORD'/g" /etc/proxysql-admin.cnf 1<> /etc/proxysql-admin.cnf 
-sed "s/CLUSTER_USERNAME='admin'/CLUSTER_USERNAME='root'/g" /etc/proxysql-admin.cnf 1<> /etc/proxysql-admin.cnf
-sed "s/CLUSTER_PASSWORD='admin'/CLUSTER_PASSWORD='$MYSQL_ROOT_PASSWORD'/g" /etc/proxysql-admin.cnf 1<> /etc/proxysql-admin.cnf
-
-#cp /etc/proxysql.cnf /tmp
-
-function add_peers {
- /usr/bin/peer-list -on-start="/usr/bin/add_cluster_nodes.sh" -service="$PXCSERVICE"
-# TODO: for replicaset we need to use "-on-change" 
+function mysql_root_exec() {
+  local server="$1"
+  local query="$2"
+  MYSQL_PWD=${MYSQL_ROOT_PASSWORD:-password} timeout 600 mysql -h${server} -uroot -s -NB -e "${query}"
 }
 
-add_peers &
+function wait_for_mysql() {
+    local h="$1"
+    echo "Waiting for host $h to be online..."
+    while [ "$(mysql_root_exec $h 'select 1')" != "1" ]
+    do
+        echo "MySQL is not up yet... sleeping ..."
+        sleep 1
+    done
+}
 
-exec /usr/bin/proxysql -f -c /etc/proxysql/proxysql.cnf
+PROXY_CFG=/etc/proxysql/proxysql.cnf
+PROXY_ADMIN_CFG=/etc/proxysql-admin.cnf
+
+sed "s/\"admin:admin\"/\"${PROXY_ADMIN_USER:-admin}:$PROXY_ADMIN_PASSWORD\"/g"       ${PROXY_CFG} 1<> ${PROXY_CFG}
+sed "s/cluster_username=\"admin\"/cluster_username=\"${PROXY_ADMIN_USER:-admin}\"/g" ${PROXY_CFG} 1<> ${PROXY_CFG}
+sed "s/cluster_password=\"admin\"/cluster_password=\"$PROXY_ADMIN_PASSWORD\"/g"      ${PROXY_CFG} 1<> ${PROXY_CFG}
+sed "s/PROXYSQL_USERNAME='admin'/PROXYSQL_USERNAME='${PROXY_ADMIN_USER:-admin}'/g" ${PROXY_ADMIN_CFG} 1<> ${PROXY_ADMIN_CFG}
+sed "s/PROXYSQL_PASSWORD='admin'/PROXYSQL_PASSWORD='$PROXY_ADMIN_PASSWORD'/g"      ${PROXY_ADMIN_CFG} 1<> ${PROXY_ADMIN_CFG}
+sed "s/CLUSTER_USERNAME='admin'/CLUSTER_USERNAME='root'/g"                         ${PROXY_ADMIN_CFG} 1<> ${PROXY_ADMIN_CFG}
+sed "s/CLUSTER_PASSWORD='admin'/CLUSTER_PASSWORD='$MYSQL_ROOT_PASSWORD'/g"         ${PROXY_ADMIN_CFG} 1<> ${PROXY_ADMIN_CFG}
+sed "s/MONITOR_USERNAME='monitor'/MONITOR_USERNAME='monitor'/g"                    ${PROXY_ADMIN_CFG} 1<> ${PROXY_ADMIN_CFG}
+sed "s/MONITOR_PASSWORD='monitor'/MONITOR_PASSWORD='$MONITOR_PASSWORD'/g"          ${PROXY_ADMIN_CFG} 1<> ${PROXY_ADMIN_CFG}
+
+## SSL/TLS support
+CA=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+if [ -f /var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt ]; then
+    CA=/var/run/secrets/kubernetes.io/serviceaccount/service-ca.crt
+fi
+SSL_DIR=${SSL_DIR:-/etc/proxysql/ssl}
+if [ -f ${SSL_DIR}/ca.crt ]; then
+    CA=${SSL_DIR}/ca.crt
+fi
+SSL_INTERNAL_DIR=${SSL_INTERNAL_DIR:-/etc/proxysql/ssl-internal}
+if [ -f ${SSL_INTERNAL_DIR}/ca.crt ]; then
+    CA=${SSL_INTERNAL_DIR}/ca.crt
+fi
+
+KEY=${SSL_DIR}/tls.key
+CERT=${SSL_DIR}/tls.crt
+if [ -f ${SSL_INTERNAL_DIR}/tls.key -a -f ${SSL_INTERNAL_DIR}/tls.crt ]; then
+    KEY=${SSL_INTERNAL_DIR}/tls.key
+    CERT=${SSL_INTERNAL_DIR}/tls.crt
+fi
+
+if [ -f $CA -a -f $KEY -a -f $CERT ]; then
+    wait_for_mysql "$PXC_SERVICE"
+    cipher=$(mysql_root_exec "$PXC_SERVICE" 'SHOW SESSION STATUS LIKE "Ssl_cipher"' | awk '{print$2}')
+
+    sed "s^have_ssl=false^have_ssl=true^"                   ${PROXY_CFG} 1<> ${PROXY_CFG}
+    sed "s^ssl_p2s_ca=\"\"^ssl_p2s_ca=\"$CA\"^"             ${PROXY_CFG} 1<> ${PROXY_CFG}
+    sed "s^ssl_p2s_ca=\"\"^ssl_p2s_ca=\"$CA\"^"             ${PROXY_CFG} 1<> ${PROXY_CFG}
+    sed "s^ssl_p2s_key=\"\"^ssl_p2s_key=\"$KEY\"^"          ${PROXY_CFG} 1<> ${PROXY_CFG}
+    sed "s^ssl_p2s_cert=\"\"^ssl_p2s_cert=\"$CERT\"^"       ${PROXY_CFG} 1<> ${PROXY_CFG}
+    sed "s^ssl_p2s_cipher=\"\"^ssl_p2s_cipher=\"$cipher\"^" ${PROXY_CFG} 1<> ${PROXY_CFG}
+fi
+
+if [ -f ${SSL_DIR}/tls.key -a -f ${SSL_DIR}/tls.crt ]; then
+    cp ${SSL_DIR}/tls.key /var/lib/proxysql/proxysql-key.pem
+    cp ${SSL_DIR}/tls.crt /var/lib/proxysql/proxysql-cert.pem
+fi
+if [ -f ${SSL_DIR}/ca.crt ]; then
+    cp ${SSL_DIR}/ca.crt /var/lib/proxysql/proxysql-ca.pem
+fi
+
+
+exec "$@"
